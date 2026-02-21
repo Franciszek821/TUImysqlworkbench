@@ -1,0 +1,7 @@
+ListView {
+    border: round #444;
+}
+
+ListView:focus {
+    border: round green;
+}
