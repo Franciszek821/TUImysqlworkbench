@@ -7,14 +7,9 @@ import mysql.connector
 import asyncio
 from textual.widgets import DataTable
 import subprocess
+import pandas as pd
 
 
-#TODO:
-'''
-Eidt table
-Dark/Light Theme Toggle: Let users switch between UI themes.
-Connection Profiles: Save and switch between multiple database connection settings.
-Error Logging: Show detailed error logs and allow users to review past errors.'''
 
 load_dotenv()
 
@@ -49,7 +44,7 @@ def get_columns(schema, table):
     conn = mysql.connector.connect(**DB_CONFIG, database=schema)
     cursor = conn.cursor()
     cursor.execute(f"SHOW COLUMNS FROM `{table}`;")
-    columns = [row[0] for row in cursor.fetchall()]  # preserves order
+    columns = [row[0] for row in cursor.fetchall()]
     cursor.close()
     conn.close()
     return columns
@@ -104,6 +99,7 @@ async def change_table(self):
         if hasattr(self, "data_table"):
             self.data_table.display = False
         self.refresh_tables()
+        self.title = f"{self.selected_schema}"
     elif self.selected_screen == 1:
         await self.show_warning("Already in table selection screen")
     else:
@@ -147,7 +143,7 @@ async def open_query_editor(self):
         self.mount(self.query_result_box)
 
 
-#drop truncate tables
+
 def delete_table(schema, table, self=None):
     conn = mysql.connector.connect(**DB_CONFIG, database=schema)
     cursor = conn.cursor()
@@ -165,10 +161,16 @@ def truncate_table(schema, table, self=None):
     cursor.close()
     conn.close()
 
+def rename_table(schema, table, self=None):
+    self.pending_table = (schema, table)
+    self.input_prompt = Center(
+        Input(placeholder="Enter new table name", id="rename_table_new")
+    )
+    self.mount(self.input_prompt)
+    self.query_one("#rename_table_new", Input).focus()
 
 #columns
 def add_column(schema, table, self=None):
-    # Prompt for column definition with a clear input
     if hasattr(self, "input_prompt"):
         self.input_prompt.remove()
     self.current_action = "Add Column"
@@ -235,15 +237,33 @@ def import_database(self=None):
     )
     self.mount(self.input_prompt)
     self.query_one("#import_db_name", Input).focus()
+def export_table_to_excel(schema, table, self=None):
+    self.pending_table = (schema, table)
+    self.input_prompt = Center(
+        Input(placeholder="Enter folder path to save Excel file (e.g., /path/table.xlsx)", id="export_excel_path")
+    )
+    self.mount(self.input_prompt)
+    self.query_one("#export_excel_path", Input).focus()
+    
+def import_table_from_excel(self):
+    schema = self.selected_schema
+    self.input_prompt = Center(
+        Input(placeholder="Enter Excel file path (e.g., /path/table.xlsx)", id="import_excel_path")
+    )
+    self.mount(self.input_prompt)
+    self.query_one("#import_excel_path", Input).focus()
 
 ACTIONS = {
-    "Create Schema"   : create_database,
+    "Create Schema"     : create_database,
     "Change Schema"     : change_schema,
     " " : lambda *args, **kwargs: None,
     "Change Table"      : change_table,
     "Create Table"      : create_table,
     "Delete Table"      : delete_table,
     "Truncate Table"    : truncate_table,
+    "Rename Table"      : rename_table,
+    "Export table to excel" : export_table_to_excel,
+    "Import table from excel" : import_table_from_excel,
     "  " : lambda *args, **kwargs: None,
     "Add Column"        : add_column,
     "Rename Column"     : rename_column,
@@ -274,12 +294,13 @@ class MysqlWorkbenchTUI(App):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.selected_schema = None
-        self.selected_screen = 0  # 0=schema, 1=table, 2=columns
-        self.current_action = None  # Ensure this attribute always exists
+        self.selected_screen = 0  
+        self.current_action = None
 
     CSS_PATH = "app.tcss"
     BINDINGS = [
         ("escape", "comeback", "Comeback to screen before"),
+        ("ctrl+c", "cancel", "Cancel input")
     ]
 
     async def action_comeback(self):
@@ -290,8 +311,21 @@ class MysqlWorkbenchTUI(App):
             return
         if self.selected_screen == 2:
             await self.change_table_comeback()
+            self.title = f"{self.selected_schema}"
+            return
         elif self.selected_screen == 1:
             await self.change_schema_comeback()
+            self.title = f"MysqlWorkbenchTUI"
+            return
+        if hasattr(self, "input_prompt"):
+            self.input_prompt.remove()
+            await self.show_correct("Action cancelled")
+            return
+    async def action_cancel(self):
+        if hasattr(self, "input_prompt"):
+            self.input_prompt.remove()
+            await self.show_correct("Action cancelled")
+            return
         
     async def change_table_comeback(self):
         if self.selected_screen == 2:
@@ -320,7 +354,6 @@ class MysqlWorkbenchTUI(App):
             await self.show_warning("Already in main screen")
 
     def refresh_tables(self):
-        """Clear and reload tables for the selected schema."""
         if not hasattr(self, "selected_schema"):
             return
 
@@ -335,6 +368,7 @@ class MysqlWorkbenchTUI(App):
             self.table_list.append(ListItem(Label(f"Error: {e}")))
 
 
+
     def refresh_columns(self):
         """Clear and reload columns for the selected table in the data_table widget."""
         if not hasattr(self, "selected_schema") or not hasattr(self, "data_table") or not self.data_table.display:
@@ -344,12 +378,12 @@ class MysqlWorkbenchTUI(App):
             table_name = self.title.split(" > ")[-1]
         if not table_name:
             return
-        # Remove and recreate the data_table widget
+        
         self.data_table.remove()
         self.data_table = DataTable()
         try:
             columns = get_columns(self.selected_schema, table_name)
-            # Add virtual row number column
+            
             self.data_table.add_column("#")
             for col in columns:
                 self.data_table.add_column(col)
@@ -376,7 +410,7 @@ class MysqlWorkbenchTUI(App):
             self.schema_list.append(ListItem(Label(f"Error: {e}")))
 
     #warning
-    async def show_warning(self, message: str, duration: float =0.5):
+    async def show_warning(self, message: str, duration: float =2):
         if hasattr(self, "warning_box"):
             self.warning_box.remove()
         
@@ -385,6 +419,14 @@ class MysqlWorkbenchTUI(App):
     
         await asyncio.sleep(duration)
         self.warning_box.remove()
+    
+    async def show_correct(self, messsage: str, duration: float=2):
+        if hasattr(self, "correct_box"):
+            self.correct_box.remove()
+        self.correct_box = Center(Static(f"[green]{messsage}[/green]"))
+        self.mount(self.correct_box)
+        await asyncio.sleep(duration)
+        self.correct_box.remove()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -435,7 +477,72 @@ class MysqlWorkbenchTUI(App):
 
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value
-        if event.input.id == "import_db_name":
+        if event.input.id == "import_excel_path":
+            self.import_excel_path = event.value.strip()
+            self.input_prompt.remove()
+            self.input_prompt = Center(
+                Input(placeholder="Enter new table name", id="import_excel_table_name")
+            )
+            self.mount(self.input_prompt)
+            self.query_one("#import_excel_table_name", Input).focus()
+            return
+        elif event.input.id == "import_excel_table_name":
+            file_path = self.import_excel_path
+            table_name = event.value.strip()
+            schema = self.selected_schema
+            self.input_prompt.remove()
+            try:
+                df = pd.read_excel(file_path)
+                conn = mysql.connector.connect(**DB_CONFIG, database=schema)
+                cursor = conn.cursor()
+                col_def = ",".join([f"`{col}` VARCHAR(255)" for col in df.columns])
+                cursor.execute(f"CREATE TABLE `{table_name}` ({col_def});")
+                cols = ", ".join([f"`{col}`" for col in df.columns])
+                placeholders = ", ".join(["%s"] * len(df.columns))
+                sql = f"INSERT INTO `{table_name}` ({cols}) VALUES ({placeholders})"
+                for row in df.itertuples(index=False, name=None):
+                    cursor.execute(sql, row)
+                conn.commit()
+                cursor.close()
+                conn.close()
+                await self.show_correct(f"Imported to new table '{table_name}' from {file_path}", 2)
+                self.refresh_tables()
+            except Exception as e:
+                await self.show_warning(f"Error: {e}", 10)
+            return
+        elif event.input.id == "export_excel_path":
+            file_path = event.value.strip()
+            schema, table = self.pending_table
+            self.input_prompt.remove()
+            try:
+                conn = mysql.connector.connect(**DB_CONFIG, database=schema)
+                df = pd.read_sql(f"SELECT * FROM `{table}`;", conn)
+                df.to_excel(file_path, index=False)
+                conn.close()
+                await self.show_correct(f"Table exported to {file_path}", 2)
+            except Exception as e:
+                await self.show_warning(f"Error: {e}", 2)
+            return
+        elif event.input.id == "rename_table_new":
+            new_table_name = event.value.strip()
+            schema, old_table = self.pending_table
+            self.input_prompt.remove()
+            try:
+                conn = mysql.connector.connect(**DB_CONFIG, database=schema)
+                cursor = conn.cursor()
+                cursor.execute(f"RENAME TABLE `{old_table}` TO `{new_table_name}`")
+                conn.commit()
+                cursor.close()
+                conn.close()
+                await self.show_correct("Table renamed successfully")
+                self.refresh_tables()
+                self.title = f"{self.selected_schema} > {new_table_name}"
+            except Exception as e:
+                await self.show_warning(f"Error: {e}", 2)
+            return
+
+
+        elif event.input.id == "import_db_name":
             self.import_db_name = event.value.strip()
             self.input_prompt.remove()
             self.input_prompt = Center(
@@ -452,7 +559,7 @@ class MysqlWorkbenchTUI(App):
             host = DB_CONFIG["host"]
             port = DB_CONFIG["port"]
             if not os.path.isfile(import_path):
-                await self.show_warning("Provided path is not a file.", 10)
+                await self.show_warning("Provided path is not a file.", 2)
                 self.input_prompt.remove()
                 return
             try:
@@ -467,11 +574,11 @@ class MysqlWorkbenchTUI(App):
                 with open(import_path, "r") as f:
                     result = subprocess.run(cmd, stdin=f, stderr=subprocess.PIPE, text=True)
                 if result.returncode == 0:
-                    await self.show_warning(f"Database imported from {import_path}", 3)
+                    await self.show_correct(f"Database imported from {import_path}", 3)
                 else:
-                    await self.show_warning(f"Import failed: {result.stderr}", 10)
+                    await self.show_warning(f"Import failed: {result.stderr}", 2)
             except Exception as e:
-                await self.show_warning(f"Error: {e}", 10)
+                await self.show_warning(f"Error: {e}", 2)
             self.input_prompt.remove()
             return
         elif event.input.id == "export_db_name":
@@ -488,7 +595,7 @@ class MysqlWorkbenchTUI(App):
             folder_path = event.value.strip()
             db_name = self.export_db_name
             if not os.path.isdir(folder_path):
-                await self.show_warning("Provided path is not a directory.", 10)
+                await self.show_warning("Provided path is not a directory.", 2)
                 self.input_prompt.remove()
                 return
             export_path = os.path.join(folder_path, f"{db_name}.sql")
@@ -508,11 +615,11 @@ class MysqlWorkbenchTUI(App):
                 with open(export_path, "w") as f:
                     result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
                 if result.returncode == 0:
-                    await self.show_warning(f"Database exported to {export_path}", 2)
+                    await self.show_correct(f"Database exported to {export_path}", 2)
                 else:
-                    await self.show_warning(f"Export failed: {result.stderr}", 10)
+                    await self.show_warning(f"Export failed: {result.stderr}", 2)
             except Exception as e:
-                await self.show_warning(f"Error: {e}", 10)
+                await self.show_warning(f"Error: {e}", 2)
             self.input_prompt.remove()
             return
         elif event.input.id == "delete_row_num":
@@ -521,7 +628,7 @@ class MysqlWorkbenchTUI(App):
             schema, table = self.pending_table
             rows = get_rows(schema, table)
             if row_number < 1 or row_number > len(rows):
-                await self.show_warning("Invalid row number", 10)
+                await self.show_warning("Invalid row number", 2)
                 return
             pk_value = rows[row_number - 1][0]
             self.confirmation_prompt = Center(
@@ -539,18 +646,18 @@ class MysqlWorkbenchTUI(App):
                 try:
                     conn = mysql.connector.connect(**DB_CONFIG, database=schema)
                     cursor = conn.cursor()
-                    # Dynamically get PK column name
+                    
                     cursor.execute(f"SHOW KEYS FROM `{table}` WHERE Key_name = 'PRIMARY';")
                     pk_info = cursor.fetchone()
                     if pk_info:
-                        pk_col = pk_info[4]  # Column_name is at index 4
+                        pk_col = pk_info[4]  
                     else:
-                        pk_col = 'id'  # fallback
+                        pk_col = 'id'  
                     cursor.execute(f"DELETE FROM `{table}` WHERE `{pk_col}` = %s;", (pk_value,))
                     conn.commit()
                     cursor.close()
                     conn.close()
-                    await self.show_warning(f"Row {self.pending_row_number} deleted successfully.")
+                    await self.show_correct(f"Row {self.pending_row_number} deleted successfully.")
                     self.refresh_columns()
                 except Exception as e:
                     await self.show_warning(f"Error: {e}", 1)
@@ -563,10 +670,10 @@ class MysqlWorkbenchTUI(App):
             schema, tables = self.pending_table
             columns = self.insert_columns
             if len(values) != len(columns):
-                await self.show_warning(f"Incorrect number of values", 10)
+                await self.show_warning(f"Incorrect number of values", 2)
                 self.input_prompt.remove()
                 return
-            # Check column types
+            
             conn = mysql.connector.connect(**DB_CONFIG, database=schema)
             cursor = conn.cursor()
             cursor.execute(f"SHOW COLUMNS FROM `{tables}`;")
@@ -574,15 +681,15 @@ class MysqlWorkbenchTUI(App):
             type_errors = []
             for idx, (col_name, col_type, _, _, _, _) in enumerate(col_info):
                 val = values[idx]
-                # Simple type check for INT
+                
                 if "int" in col_type.lower():
                     try:
                         int(val)
                     except ValueError:
                         type_errors.append(f"Column '{col_name}' expects INT, got '{val}'")
-                # Add more type checks as needed (float, date, etc.)
+                
             if type_errors:
-                await self.show_warning("; ".join(type_errors), 10)
+                await self.show_warning("; ".join(type_errors), 2)
                 self.input_prompt.remove()
                 cursor.close()
                 conn.close()
@@ -597,10 +704,10 @@ class MysqlWorkbenchTUI(App):
                 conn.commit()
                 cursor.close()
                 conn.close()
-                await self.show_warning("Row inserted")
+                await self.show_correct("Row inserted")
                 self.refresh_columns()
             except Exception as e:
-                await self.show_warning(f"Error: {e}", 10)
+                await self.show_warning(f"Error: {e}", 2)
             self.input_prompt.remove()
             return
         elif event.input.id == "delete_col_name":
@@ -621,7 +728,7 @@ class MysqlWorkbenchTUI(App):
                 conn.commit()
                 cursor.close()
                 conn.close()
-                await self.show_warning("Column deleted")
+                await self.show_correct("Column deleted")
                 self.refresh_columns()
             except Exception as e:
                 await self.show_warning(f"Error: {e}", 1)
@@ -646,7 +753,7 @@ class MysqlWorkbenchTUI(App):
                 conn.commit()
                 cursor.close()
                 conn.close()
-                await self.show_warning("Column renamed")
+                await self.show_correct("Column renamed")
                 self.refresh_columns()
             except Exception as e:
                 await self.show_warning(f"Error: {e}")
@@ -658,7 +765,7 @@ class MysqlWorkbenchTUI(App):
                 action_name, schema, table = self.pending_action
                 try:
                     ACTIONS[action_name](schema, table, self)
-                    await self.show_warning(f"{action_name} successful")
+                    await self.show_correct(f"{action_name} successful")
                     if hasattr(self, "data_table"):
                         self.data_table.remove()
                     self.selected_screen = 1
@@ -666,9 +773,9 @@ class MysqlWorkbenchTUI(App):
                     self.refresh_tables()
                     self.title = f"{self.selected_schema}"
                 except Exception as e:
-                    await self.show_warning(f"Error {e}", duration=10)
+                    await self.show_warning(f"Error {e}", duration=2)
             else:
-                await self.show_warning("Action cancelled")
+                await self.show_correct("Action cancelled")
             return
         elif event.input.id == "query_input":
             if hasattr(self, "query_editor_box"):
@@ -704,7 +811,7 @@ class MysqlWorkbenchTUI(App):
 
         if self.current_action == "Add Column":
             schema, table = self.pending_table
-            col_def = value.strip()  # e.g., "age INT"
+            col_def = value.strip()
             try:
                 conn = mysql.connector.connect(**DB_CONFIG, database=schema)
                 cursor = conn.cursor()
@@ -712,7 +819,7 @@ class MysqlWorkbenchTUI(App):
                 conn.commit()
                 cursor.close()
                 conn.close()
-                await self.show_warning("Column added")
+                await self.show_correct("Column added")
                 self.refresh_columns()
             except Exception as e:
                 await self.show_warning(f"Error: {e}")
@@ -721,7 +828,7 @@ class MysqlWorkbenchTUI(App):
             if self.current_action == "Create Table":
                 ACTIONS[self.current_action](self.selected_schema, value, self)
                 self.refresh_tables()
-            elif self.current_action == "Create Database":
+            elif self.current_action == "Create Schema":
                 ACTIONS[self.current_action](value, self)
                 self.refresh_schemas()
 
@@ -749,7 +856,7 @@ class MysqlWorkbenchTUI(App):
             self.data_table = DataTable()
             try:
                 columns = get_columns(self.selected_schema, event.item.name)
-                # Add virtual row number column
+                
                 self.data_table.add_column("#")
                 for col in columns:
                     self.data_table.add_column(col)
@@ -765,18 +872,16 @@ class MysqlWorkbenchTUI(App):
                 self.title = f"{self.selected_schema} > {event.item.name}"
             except Exception as e:
                 self.table_list.append(ListItem(Label(f"Error: {e}")))
-
-
-
         selected_name = event.item.name
+        
         if selected_name in ["Create Table"] and self.selected_screen == 1:
             self.show_input(selected_name)
         elif selected_name in ["Create Table"] and self.selected_screen != 1:
             await self.show_warning("Select schema first")
-        elif selected_name in ["Create Database"] and self.selected_screen == 0:
+        elif selected_name in ["Create Schema"] and self.selected_screen == 0:
             self.show_input(selected_name)
-        elif selected_name in ["Create Database"] and self.selected_screen != 0:
-            await self.show_warning("Go to main screen to create a database") 
+        elif selected_name in ["Create Schema"] and self.selected_screen != 0:
+            await self.show_warning("Go to main screen to create a Schema") 
         elif selected_name in ["Change Schema", "Change Table"]:
             coro = ACTIONS[selected_name](self)
             if asyncio.iscoroutine(coro):
@@ -796,19 +901,26 @@ class MysqlWorkbenchTUI(App):
                 self.show_confirmation(selected_name, schema_name, table_name)
             else:
                 await self.show_warning("Select a table first")
-        elif selected_name in ["Add Column", "Rename Column", "Delete Column", "Insert Row", "Delete Row"]:
+        elif selected_name in ["Add Column", "Rename Column", "Delete Column", "Insert Row", "Delete Row", "Export table to excel"]:
             if self.selected_screen == 2 and hasattr(self, "data_table"):
                 table_name = self.title.split(" > ")[-1]
                 schema_name = self.selected_schema
                 ACTIONS[selected_name](schema_name , table_name, self)
             else:
                 await self.show_warning("Select a table first")
-        elif selected_name in ["Export Database", "Import Database"]:
+        elif selected_name in ["Export Schema", "Import Schema"]:
             if self.selected_screen == 0:
                 ACTIONS[selected_name](self)
             else:
-                await self.show_warning("Go to main screen to import/export a database") 
+                await self.show_warning("Go to main screen to import/export a Schema") 
         elif selected_name == "Refresh":
+            ACTIONS[selected_name](self)
+        elif selected_name in ["Rename Table"]:
+            if self.selected_screen == 2:
+                ACTIONS[selected_name](self.selected_schema, self.title.split(" > ")[-1], self)
+            else:
+                await self.show_warning("Select a table first")
+        if selected_name in ["Import table from excel"] and self.selected_screen == 1:
             ACTIONS[selected_name](self)
 
 if __name__ == "__main__":
