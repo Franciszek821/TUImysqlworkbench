@@ -37,7 +37,7 @@ A terminal-based MySQL Workbench built with Python and [Textual](https://github.
 	```
 
 ## Usage
-1. Configure your MySQL connection in `terminal.py` (edit the `DB_CONFIG` dictionary).
+1. Configure your MySQL connection in `.env.example`, after configuration change name to `env` .
 2. Run the app:
 	```bash
 	python terminal.py
